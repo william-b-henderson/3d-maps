@@ -221,68 +221,9 @@ export default function Home() {
         </div>
       )}
 
-      {/* Control Panel Overlay - Bottom Left */}
-      <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-3">
-        <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-4 max-w-sm">
-          <h1 className="text-lg font-semibold text-white mb-3">
-            3D Maps Explorer
-          </h1>
-
-          {/* Location Buttons */}
-          <div className="mb-4">
-            <label className="text-xs font-medium text-white/60 uppercase tracking-wide mb-2 block">
-              Quick Locations
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {LOCATIONS.map((location) => (
-                <button
-                  key={location.name}
-                  onClick={() => handleLocationClick(location)}
-                  className={`px-3 py-1.5 text-sm rounded-lg transition-all duration-200 ${
-                    selectedLocation.name === location.name &&
-                    !lastSearchedAddress
-                      ? "bg-white/30 text-white"
-                      : "bg-white/10 text-white/80 hover:bg-white/20"
-                  }`}
-                >
-                  {location.name}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Map Mode Toggle */}
-          <div>
-            <label className="text-xs font-medium text-white/60 uppercase tracking-wide mb-2 block">
-              Map Mode
-            </label>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setMapMode("hybrid")}
-                className={`flex-1 px-3 py-1.5 text-sm rounded-lg transition-all duration-200 ${
-                  mapMode === "hybrid"
-                    ? "bg-white/30 text-white"
-                    : "bg-white/10 text-white/80 hover:bg-white/20"
-                }`}
-              >
-                Hybrid
-              </button>
-              <button
-                onClick={() => setMapMode("satellite")}
-                className={`flex-1 px-3 py-1.5 text-sm rounded-lg transition-all duration-200 ${
-                  mapMode === "satellite"
-                    ? "bg-white/30 text-white"
-                    : "bg-white/10 text-white/80 hover:bg-white/20"
-                }`}
-              >
-                Satellite
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Heatmap Layer Controls */}
-        {isMapReady && (
+      {/* Heatmap Layer Controls - Bottom Left */}
+      {isMapReady && (
+        <div className="absolute bottom-4 left-4 z-20">
           <HeatmapPanel
             layers={availableLayers}
             activeLayerId={activeLayerId}
@@ -291,8 +232,8 @@ export default function Home() {
             onToggleLayer={toggleLayer}
             onOpacityChange={setHeatmapOpacity}
           />
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Instructions Overlay - Bottom Right */}
       <div className="absolute bottom-4 right-4 z-20">
