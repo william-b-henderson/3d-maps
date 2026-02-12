@@ -29,6 +29,11 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* Hide Google Maps alpha channel development banner */
+.vAygCK-api-load-alpha-banner {
+  display: none !important;
+}
+
 /* Google Maps 3D Element Styles */
 gmp-map-3d {
   width: 100%;
