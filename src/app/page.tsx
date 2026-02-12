@@ -68,17 +68,28 @@ export default function Home() {
     // Clear any existing highlights
     mapRef.current?.clearHighlights();
 
-    // Fly to the geocoded location
-    mapRef.current?.flyTo(
+    // Compute orbit center altitude (meters above sea level) so the camera
+    // doesn't clip through terrain or buildings. Priority:
+    //   1) Rooftop height from Solar API + 10m buffer (best)
+    //   2) Terrain elevation from Elevation API + 30m above ground (good)
+    //   3) Fixed 50m fallback (last resort)
+    const orbitAltitude = location.buildingHeightMeters
+      ? location.buildingHeightMeters + 10
+      : location.elevationMeters != null
+        ? location.elevationMeters + 30
+        : 50;
+
+    // Fly to the property and begin a slow orbit around it
+    mapRef.current?.orbitProperty(
       {
         lat: location.lat,
         lng: location.lng,
-        altitude: 0,
+        altitude: orbitAltitude,
         tilt: 60,
         heading: 0,
-        range: 400, // Closer zoom for property view
+        range: 100, // 100m from property
       },
-      3000 // 3 second animation
+      3000 // 3 second fly-to animation
     );
 
     // Debug: log what building data the API returned
@@ -139,7 +150,8 @@ export default function Home() {
     setSelectedLocation(location);
     setLastSearchedAddress(null);
 
-    // Clear any existing highlights when switching to preset locations
+    // Stop any active orbit animation and clear highlights
+    mapRef.current?.stopAnimation();
     mapRef.current?.clearHighlights();
 
     mapRef.current?.flyTo(

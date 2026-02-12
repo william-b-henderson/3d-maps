@@ -128,8 +128,10 @@ export interface GeocodeResponse {
   buildingOutline: BuildingOutlineResult | null;
   /** Bounding box around the building from the Solar API, if available. */
   buildingBounds: BuildingBounds | null;
-  /** Building height in meters above ground from the Solar API, if available. */
+  /** Building rooftop height in meters above sea level from the Solar API, if available. */
   buildingHeightMeters: number | null;
+  /** Terrain elevation in meters above sea level from the Elevation API, if available. */
+  elevationMeters: number | null;
 }
 
 // ── Helper functions ─────────────────────────────────────────────────────
@@ -220,6 +222,45 @@ async function fetchBuildingInsights(
   }
 }
 
+/**
+ * Fetches the terrain elevation at a given lat/lng using the Google Maps
+ * Elevation API. Returns meters above sea level (EGM96), or null on failure.
+ *
+ * @param lat - Latitude of the location
+ * @param lng - Longitude of the location
+ * @param apiKey - Google Maps API key
+ * @returns Elevation in meters above sea level, or null
+ */
+async function fetchElevation(
+  lat: number,
+  lng: number,
+  apiKey: string
+): Promise<number | null> {
+  try {
+    const url = `https://maps.googleapis.com/maps/api/elevation/json?locations=${lat},${lng}&key=${apiKey}`;
+    const res = await fetch(url);
+
+    if (!res.ok) {
+      console.warn(`Elevation API returned ${res.status} for ${lat},${lng}`);
+      return null;
+    }
+
+    const data = (await res.json()) as {
+      status: string;
+      results?: Array<{ elevation: number }>;
+    };
+
+    if (data.status !== "OK" || !data.results?.length) {
+      return null;
+    }
+
+    return data.results[0].elevation;
+  } catch (err) {
+    console.error("Elevation API error:", err);
+    return null;
+  }
+}
+
 // ── Route handler ────────────────────────────────────────────────────────
 
 /**
@@ -293,9 +334,12 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Fetch building bounds and height from Solar API (in parallel with nothing — it's after geocoding)
-    const { buildingBounds, buildingHeightMeters } =
-      await fetchBuildingInsights(lat, lng, apiKey);
+    // Fetch building data and terrain elevation in parallel
+    const [{ buildingBounds, buildingHeightMeters }, elevationMeters] =
+      await Promise.all([
+        fetchBuildingInsights(lat, lng, apiKey),
+        fetchElevation(lat, lng, apiKey),
+      ]);
 
     const response: GeocodeResponse = {
       lat,
@@ -305,6 +349,7 @@ export async function GET(request: NextRequest) {
       buildingOutline,
       buildingBounds,
       buildingHeightMeters,
+      elevationMeters,
     };
 
     return NextResponse.json(response);

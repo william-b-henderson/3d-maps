@@ -36,8 +36,10 @@ export interface GeocodedLocation {
   buildingOutline: BuildingOutline | null;
   /** Building bounding box from the Solar API, if available */
   buildingBounds: BuildingBounds | null;
-  /** Building height in meters above ground from the Solar API, if available */
+  /** Building rooftop height in meters above sea level from the Solar API, if available */
   buildingHeightMeters: number | null;
+  /** Terrain elevation in meters above sea level from the Elevation API, if available */
+  elevationMeters: number | null;
 }
 
 /**
@@ -84,6 +86,7 @@ async function geocodeViaApi(
       buildingOutline: data.buildingOutline,
       buildingBounds: data.buildingBounds,
       buildingHeightMeters: data.buildingHeightMeters,
+      elevationMeters: data.elevationMeters,
     };
   } catch (error) {
     console.error("Geocoding error:", error);

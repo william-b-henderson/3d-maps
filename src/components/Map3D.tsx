@@ -75,6 +75,16 @@ export interface Map3DRef {
   flyTo: (position: CameraPosition, durationMs?: number) => Promise<void>;
   /** Stop any ongoing camera animation */
   stopAnimation: () => void;
+  /**
+   * Fly to a property and begin a slow orbit around it.
+   * The camera is positioned at the specified range (default 100m) and tilt
+   * (default 60°), then continuously orbits the property until the user
+   * manually interacts with the map.
+   *
+   * @param position - Target property location
+   * @param flyDurationMs - Duration of the initial fly-to animation (default 3000ms)
+   */
+  orbitProperty: (position: CameraPosition, flyDurationMs?: number) => void;
   /** Highlight a location with a circular 3D extruded polygon (fallback) */
   highlightLocation: (
     lat: number,
@@ -349,6 +359,9 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.maps3d.Map3DElement | null>(null);
   const highlightElementsRef = useRef<HTMLElement[]>([]);
+  /** Tracks the current orbit animation-end listener so it can be removed if
+   *  `orbitProperty` is called again before the fly-to completes. */
+  const orbitListenerRef = useRef<(() => void) | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -378,6 +391,63 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
       if (mapRef.current) {
         mapRef.current.stopCameraAnimation();
       }
+    },
+
+    orbitProperty: (position: CameraPosition, flyDurationMs = 3000) => {
+      const map = mapRef.current;
+      if (!map) {
+        console.warn("Map not ready for orbitProperty");
+        return;
+      }
+
+      // Clean up any pending orbit listener from a previous call
+      if (orbitListenerRef.current) {
+        map.removeEventListener("gmp-animationend", orbitListenerRef.current);
+        orbitListenerRef.current = null;
+      }
+
+      // Stop any in-progress animation before starting the new fly-to
+      map.stopCameraAnimation();
+
+      const targetCamera = {
+        center: {
+          lat: position.lat,
+          lng: position.lng,
+          altitude: position.altitude,
+        },
+        tilt: position.tilt ?? 60,
+        heading: position.heading ?? 0,
+        range: position.range ?? 100,
+      };
+
+      // Track whether the fly-to has started so we can ignore any stale
+      // gmp-animationend events fired by stopCameraAnimation above.
+      let flyStarted = false;
+
+      // Phase 2 handler: when fly-to completes, begin a slow continuous orbit
+      const onAnimationEnd = () => {
+        if (!flyStarted) return; // ignore stale event from stopCameraAnimation
+        orbitListenerRef.current = null;
+        map.flyCameraAround({
+          camera: targetCamera,
+          durationMillis: 60000, // 60 seconds per full revolution
+          repeatCount: 999, // effectively infinite; user interaction stops it
+        });
+      };
+
+      orbitListenerRef.current = onAnimationEnd;
+      map.addEventListener("gmp-animationend", onAnimationEnd, { once: true });
+
+      // Phase 1: Fly to the property (start after listener is registered)
+      // Use a microtask to ensure any stale animationend from
+      // stopCameraAnimation flushes before we mark flyStarted = true.
+      queueMicrotask(() => {
+        flyStarted = true;
+        map.flyCameraTo({
+          endCamera: targetCamera,
+          durationMillis: flyDurationMs,
+        });
+      });
     },
 
     /**
