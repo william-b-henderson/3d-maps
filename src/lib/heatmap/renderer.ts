@@ -98,15 +98,16 @@ export class HeatmapRenderer {
           poly.fillColor = cell.fillColor;
         } else {
           // ---- CREATE a new polygon ----
-          // Use RELATIVE_TO_GROUND with a small altitude so the polygon
-          // renders as a thin extruded slab on the terrain surface.
-          // extruded: true is required for the 3D renderer to draw the fill.
+          // Float the polygon above all buildings (RELATIVE_TO_GROUND at
+          // HEATMAP_ALTITUDE metres).  extruded: false gives a flat face
+          // with no side walls, eliminating the color-shift artifact from
+          // lighting on wall normals.
           const poly = new Polygon3DElement({
             altitudeMode: "RELATIVE_TO_GROUND",
             fillColor: cell.fillColor,
             strokeColor: "rgba(0, 0, 0, 0)",
             strokeWidth: 0,
-            extruded: true,
+            extruded: false,
             drawsOccludedSegments: true,
           });
           poly.outerCoordinates = cell.coords;

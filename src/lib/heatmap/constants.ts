@@ -71,8 +71,7 @@ export const DEFAULT_LAYER_OPACITY = 0.55;
 
 /**
  * Altitude (meters above ground) for heatmap polygons.
- * Must be > 0 for the extruded polygon to actually render.
- * 3m is thin enough to look flat from the typical city-overview distance
- * (range 1000-5000m) while still being visible to the 3D renderer.
+ * 120m clears all SF buildings (Salesforce Tower ≈ 100m in the 3D tiles)
+ * so the heatmap floats cleanly above the skyline as an overlay.
  */
-export const HEATMAP_ALTITUDE = 3;
+export const HEATMAP_ALTITUDE = 30;
