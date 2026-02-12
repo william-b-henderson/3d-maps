@@ -5,7 +5,11 @@ import Link from "next/link";
 import Map3D, { Map3DRef } from "@/components/Map3D";
 import AddressSearch, { GeocodedLocation } from "@/components/AddressSearch";
 import HeatmapPanel from "@/components/HeatmapPanel";
+import NeighborhoodPanel from "@/components/NeighborhoodPanel";
 import { useHeatmapLayers } from "@/hooks/useHeatmapLayers";
+import { loadOnboardingData } from "@/lib/onboarding/constants";
+import { getNeighborhoodBoundary } from "@/lib/neighborhoods/boundaries";
+import { ensureGoogleMapsLoaded } from "@/lib/google-maps-loader";
 
 /**
  * Predefined locations for quick navigation
@@ -78,6 +82,168 @@ export default function Home() {
     toggleLayer,
     setOpacity: setHeatmapOpacity,
   } = useHeatmapLayers(mapElement);
+
+  // ---------------------------------------------------------------------------
+  // Neighborhood outlines
+  // ---------------------------------------------------------------------------
+
+  /** Neighborhoods currently displayed as outlines on the 3D map. */
+  const [activeNeighborhoods, setActiveNeighborhoods] = useState<string[]>([]);
+
+  /** Whether onboarding has been completed (checked client-side). */
+  const [onboardingDone, setOnboardingDone] = useState(false);
+
+  /** Tracks rendered polygon elements so we can add/remove individually. */
+  const neighborhoodPolygonsRef = useRef<Map<string, google.maps.maps3d.Polygon3DElement>>(new Map());
+
+  /**
+   * On mount, load onboarding data from localStorage and initialise
+   * the active neighborhoods from the user's saved selections.
+   */
+  useEffect(() => {
+    const data = loadOnboardingData();
+    if (data) {
+      setOnboardingDone(true);
+      setActiveNeighborhoods(data.neighborhoods);
+    }
+  }, []);
+
+  /**
+   * Sync polygon elements on the map whenever activeNeighborhoods or
+   * the mapElement changes. Adds polygons for newly active neighborhoods
+   * and removes polygons for deactivated ones.
+   */
+  useEffect(() => {
+    if (!mapElement) return;
+
+    const currentPolygons = neighborhoodPolygonsRef.current;
+    const activeSet = new Set(activeNeighborhoods);
+
+    // Remove polygons that are no longer active
+    for (const [name, poly] of currentPolygons) {
+      if (!activeSet.has(name)) {
+        poly.remove();
+        currentPolygons.delete(name);
+      }
+    }
+
+    // Add polygons for newly active neighborhoods
+    async function addNewPolygons() {
+      await ensureGoogleMapsLoaded();
+      const { Polygon3DElement } = (await google.maps.importLibrary(
+        "maps3d"
+      )) as google.maps.Maps3DLibrary;
+
+      for (const name of activeNeighborhoods) {
+        if (currentPolygons.has(name)) continue;
+
+        const coords = getNeighborhoodBoundary(name);
+        if (!coords) continue;
+
+        const poly = new Polygon3DElement({
+          altitudeMode: "RELATIVE_TO_GROUND" as google.maps.maps3d.AltitudeMode,
+          fillColor: "rgba(0, 0, 0, 0)",
+          strokeColor: "rgba(59, 130, 246, 0.6)",
+          strokeWidth: 4,
+          extruded: false,
+          drawsOccludedSegments: true,
+        });
+        poly.outerCoordinates = coords;
+        mapElement!.appendChild(poly);
+        currentPolygons.set(name, poly);
+      }
+    }
+
+    addNewPolygons();
+  }, [activeNeighborhoods, mapElement]);
+
+  /**
+   * Toggles a neighborhood outline on or off on the map.
+   *
+   * @param name - The neighborhood name to toggle
+   */
+  const handleNeighborhoodToggle = useCallback((name: string) => {
+    setActiveNeighborhoods((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
+    );
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Neighborhood hover highlight (elevated polygon above buildings)
+  // ---------------------------------------------------------------------------
+
+  /** The neighborhood currently being hovered in the panel. */
+  const [hoveredNeighborhood, setHoveredNeighborhood] = useState<string | null>(null);
+
+  /** Single reusable polygon element for the hover highlight. */
+  const hoverPolygonRef = useRef<google.maps.maps3d.Polygon3DElement | null>(null);
+
+  /**
+   * Sets the hovered neighborhood name (or null to clear).
+   */
+  const handleNeighborhoodHover = useCallback((name: string | null) => {
+    setHoveredNeighborhood(name);
+  }, []);
+
+  /**
+   * Creates / removes an elevated semi-transparent polygon above the
+   * buildings when the user hovers a neighborhood in the panel.
+   * Uses the same altitude as the heatmap layer (~30m RELATIVE_TO_GROUND).
+   */
+  useEffect(() => {
+    if (!mapElement) return;
+
+    // Remove any existing hover polygon
+    if (hoverPolygonRef.current) {
+      hoverPolygonRef.current.remove();
+      hoverPolygonRef.current = null;
+    }
+
+    if (!hoveredNeighborhood) return;
+
+    const coords = getNeighborhoodBoundary(hoveredNeighborhood);
+    if (!coords) return;
+
+    // Lift coordinates to heatmap altitude (30m above ground)
+    const elevatedCoords = coords.map((c) => ({
+      ...c,
+      altitude: 30,
+    }));
+
+    async function createHoverPolygon() {
+      await ensureGoogleMapsLoaded();
+      const { Polygon3DElement } = (await google.maps.importLibrary(
+        "maps3d"
+      )) as google.maps.Maps3DLibrary;
+
+      const poly = new Polygon3DElement({
+        altitudeMode: "RELATIVE_TO_GROUND" as google.maps.maps3d.AltitudeMode,
+        fillColor: "rgba(59, 130, 246, 0.5)",
+        strokeColor: "rgba(59, 130, 246, 0.8)",
+        strokeWidth: 2,
+        extruded: false,
+        drawsOccludedSegments: true,
+      });
+      poly.outerCoordinates = elevatedCoords;
+      if (mapElement) {
+        mapElement.appendChild(poly);
+        hoverPolygonRef.current = poly;
+      }
+    }
+
+    createHoverPolygon();
+
+    return () => {
+      if (hoverPolygonRef.current) {
+        hoverPolygonRef.current.remove();
+        hoverPolygonRef.current = null;
+      }
+    };
+  }, [hoveredNeighborhood, mapElement]);
+
+  // ---------------------------------------------------------------------------
+  // Heatmap state helpers
+  // ---------------------------------------------------------------------------
 
   /**
    * Ref that tracks whether a heatmap layer is currently active.
@@ -258,6 +424,17 @@ export default function Home() {
             opacity={heatmapOpacity}
             onToggleLayer={toggleLayer}
             onOpacityChange={setHeatmapOpacity}
+          />
+        </div>
+      )}
+
+      {/* Neighborhood Panel - Top Right */}
+      {isMapReady && onboardingDone && (
+        <div className="absolute top-20 right-4 z-20">
+          <NeighborhoodPanel
+            activeNeighborhoods={activeNeighborhoods}
+            onToggle={handleNeighborhoodToggle}
+            onHover={handleNeighborhoodHover}
           />
         </div>
       )}
