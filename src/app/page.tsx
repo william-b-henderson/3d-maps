@@ -3,6 +3,8 @@
 import { useState, useRef, useCallback } from "react";
 import Map3D, { Map3DRef } from "@/components/Map3D";
 import AddressSearch, { GeocodedLocation } from "@/components/AddressSearch";
+import HeatmapPanel from "@/components/HeatmapPanel";
+import { useHeatmapLayers } from "@/hooks/useHeatmapLayers";
 
 /**
  * Predefined locations for quick navigation
@@ -56,6 +58,26 @@ export default function Home() {
     null
   );
   const mapRef = useRef<Map3DRef>(null);
+  const [mapElement, setMapElement] = useState<google.maps.maps3d.Map3DElement | null>(null);
+
+  /**
+   * Called when the 3D map is ready (or re-initializes after prop changes).
+   * Updates both the readiness flag and the live Map3DElement reference
+   * so the heatmap renderer always targets the current DOM element.
+   */
+  const handleMapReady = useCallback(() => {
+    setIsMapReady(true);
+    setMapElement(mapRef.current?.getMapElement() ?? null);
+  }, []);
+
+  const {
+    availableLayers,
+    activeLayerId,
+    isLoading: isHeatmapLoading,
+    opacity: heatmapOpacity,
+    toggleLayer,
+    setOpacity: setHeatmapOpacity,
+  } = useHeatmapLayers(mapElement);
 
   /**
    * Handles when an address is found via geocoding.
@@ -178,7 +200,7 @@ export default function Home() {
         range={selectedLocation.range}
         mode={mapMode}
         className="w-full h-full"
-        onReady={() => setIsMapReady(true)}
+        onReady={handleMapReady}
       />
 
       {/* Floating Address Search - Top Center */}
@@ -200,7 +222,7 @@ export default function Home() {
       )}
 
       {/* Control Panel Overlay - Bottom Left */}
-      <div className="absolute bottom-4 left-4 z-20">
+      <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-3">
         <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-4 max-w-sm">
           <h1 className="text-lg font-semibold text-white mb-3">
             3D Maps Explorer
@@ -258,6 +280,18 @@ export default function Home() {
             </div>
           </div>
         </div>
+
+        {/* Heatmap Layer Controls */}
+        {isMapReady && (
+          <HeatmapPanel
+            layers={availableLayers}
+            activeLayerId={activeLayerId}
+            isLoading={isHeatmapLoading}
+            opacity={heatmapOpacity}
+            onToggleLayer={toggleLayer}
+            onOpacityChange={setHeatmapOpacity}
+          />
+        )}
       </div>
 
       {/* Instructions Overlay - Bottom Right */}

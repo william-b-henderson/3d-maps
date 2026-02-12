@@ -103,6 +103,8 @@ export interface Map3DRef {
   ) => void;
   /** Clear all highlights from the map */
   clearHighlights: () => void;
+  /** Get the underlying Map3DElement for direct access (e.g. heatmap overlays) */
+  getMapElement: () => google.maps.maps3d.Map3DElement | null;
 }
 
 /**
@@ -563,6 +565,8 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
       highlightElementsRef.current.forEach((el) => el.remove());
       highlightElementsRef.current = [];
     },
+
+    getMapElement: () => mapRef.current,
   }));
 
   useEffect(() => {
