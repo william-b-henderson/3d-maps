@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { ensureGoogleMapsLoaded } from "@/lib/google-maps-loader";
 
 /**
  * A single autocomplete prediction returned by the Places API
@@ -31,6 +32,8 @@ const DEBOUNCE_MS = 300;
 async function fetchPredictions(
   input: string
 ): Promise<AddressPrediction[]> {
+  await ensureGoogleMapsLoaded();
+
   const { AutocompleteService } = (await google.maps.importLibrary(
     "places"
   )) as google.maps.PlacesLibrary;

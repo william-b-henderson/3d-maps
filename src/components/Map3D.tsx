@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { HEATMAP_ALTITUDE } from "@/lib/heatmap/constants";
+import { ensureGoogleMapsLoaded } from "@/lib/google-maps-loader";
 
 /**
  * Camera position for fly animations
@@ -258,36 +259,6 @@ function createExtrudedPolygon(
 
   polygon.outerCoordinates = outerCoordinates;
   return polygon;
-}
-
-/**
- * Loads the Google Maps JavaScript API script dynamically
- * @param apiKey - The Google Maps API key
- * @returns Promise that resolves when the script is loaded
- */
-function loadGoogleMapsScript(apiKey: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (window.google?.maps?.maps3d) {
-      resolve();
-      return;
-    }
-
-    const existingScript = document.querySelector(
-      'script[src*="maps.googleapis.com"]'
-    );
-    if (existingScript) {
-      existingScript.addEventListener("load", () => resolve());
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&v=alpha&libraries=maps3d,geocoding`;
-    script.async = true;
-    script.defer = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Failed to load Google Maps API"));
-    document.head.appendChild(script);
-  });
 }
 
 /**
@@ -698,21 +669,11 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
   }));
 
   useEffect(() => {
-    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-
-    if (!apiKey) {
-      setError(
-        "Google Maps API key is missing. Please set NEXT_PUBLIC_GOOGLE_MAPS_API_KEY in your environment variables."
-      );
-      setIsLoading(false);
-      return;
-    }
-
     let mounted = true;
 
     async function initMap() {
       try {
-        await loadGoogleMapsScript(apiKey!);
+        await ensureGoogleMapsLoaded();
         if (!mounted || !containerRef.current) return;
 
         const { Map3DElement } = (await google.maps.importLibrary(
