@@ -10,6 +10,12 @@ import { useHeatmapLayers } from "@/hooks/useHeatmapLayers";
 import { loadOnboardingData } from "@/lib/onboarding/constants";
 import { getNeighborhoodBoundary } from "@/lib/neighborhoods/boundaries";
 import { ensureGoogleMapsLoaded } from "@/lib/google-maps-loader";
+import { createWorkMarker, removeWorkMarker } from "@/lib/markers/work-marker";
+import { renderRoute, removeRoute } from "@/lib/routes/route-renderer";
+import { decodePolyline } from "@/lib/routes/polyline-decoder";
+import CommutePanel from "@/components/CommutePanel";
+import type { DirectionsResponse } from "@/app/api/directions/route";
+import type { WorkLocation } from "@/lib/onboarding/types";
 
 /**
  * Predefined locations for quick navigation
@@ -93,20 +99,98 @@ export default function Home() {
   /** Whether onboarding has been completed (checked client-side). */
   const [onboardingDone, setOnboardingDone] = useState(false);
 
+  /** Work location from the personalize flow (Step 2). */
+  const [workLocation, setWorkLocation] = useState<WorkLocation | null>(null);
+
+  /** Tracks the rendered work marker element for cleanup. */
+  const workMarkerRef = useRef<HTMLElement | null>(null);
+
+  /** Commute info (duration, distance, polyline) from the Directions API. */
+  const [commuteInfo, setCommuteInfo] = useState<{
+    durationText: string;
+    distanceText: string;
+    encodedPolyline: string;
+  } | null>(null);
+
+  /** Whether a directions request is in flight. */
+  const [isCommuteLoading, setIsCommuteLoading] = useState(false);
+
+  /** Tracks the rendered route polyline for cleanup. */
+  const routePolylineRef = useRef<google.maps.maps3d.Polyline3DElement | null>(null);
+
   /** Tracks rendered polygon elements so we can add/remove individually. */
   const neighborhoodPolygonsRef = useRef<Map<string, google.maps.maps3d.Polygon3DElement>>(new Map());
 
   /**
    * On mount, load onboarding data from localStorage and initialise
-   * the active neighborhoods from the user's saved selections.
+   * the active neighborhoods and work location from the user's saved selections.
    */
   useEffect(() => {
     const data = loadOnboardingData();
     if (data) {
       setOnboardingDone(true);
       setActiveNeighborhoods(data.neighborhoods);
+      setWorkLocation(data.workLocation);
     }
   }, []);
+
+  // ---------------------------------------------------------------------------
+  // Work location 3D marker
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Renders a 3D marker at the user's work location whenever the map is ready
+   * and a work address exists. Cleans up the previous marker on re-render or
+   * unmount so we never show stale pins.
+   */
+  useEffect(() => {
+    if (!mapElement || !workLocation) return;
+
+    let cancelled = false;
+
+    createWorkMarker(mapElement, workLocation).then((marker) => {
+      if (cancelled) {
+        removeWorkMarker(marker);
+        return;
+      }
+      workMarkerRef.current = marker;
+    });
+
+    return () => {
+      cancelled = true;
+      removeWorkMarker(workMarkerRef.current);
+      workMarkerRef.current = null;
+    };
+  }, [mapElement, workLocation]);
+
+  // ---------------------------------------------------------------------------
+  // Route polyline rendering
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Renders the driving route polyline on the map whenever commute info
+   * is available. Cleans up the previous polyline on re-render or unmount.
+   */
+  useEffect(() => {
+    if (!mapElement || !commuteInfo) return;
+
+    let cancelled = false;
+
+    const coords = decodePolyline(commuteInfo.encodedPolyline);
+    renderRoute(mapElement, coords).then((polyline) => {
+      if (cancelled) {
+        removeRoute(polyline);
+        return;
+      }
+      routePolylineRef.current = polyline;
+    });
+
+    return () => {
+      cancelled = true;
+      removeRoute(routePolylineRef.current);
+      routePolylineRef.current = null;
+    };
+  }, [mapElement, commuteInfo]);
 
   /**
    * Sync polygon elements on the map whenever activeNeighborhoods or
@@ -263,15 +347,24 @@ export default function Home() {
   }, [activeLayerId]);
 
   /**
+   * Ref that tracks the current work location so handleLocationFound
+   * can access it without being re-created when workLocation changes.
+   */
+  const workLocationRef = useRef<WorkLocation | null>(null);
+  workLocationRef.current = workLocation;
+
+  /**
    * Handles when an address is found via geocoding.
    * Uses the building outline polygon when available for a precise footprint
    * highlight; falls back to a circular highlight otherwise.
+   * Also fetches driving directions to the user's work location if set.
    */
   const handleLocationFound = useCallback((location: GeocodedLocation) => {
     setLastSearchedLocation(location);
 
-    // Clear any existing highlights
+    // Clear any existing highlights and previous commute data
     mapRef.current?.clearHighlights();
+    setCommuteInfo(null);
 
     // Compute orbit center altitude (meters above sea level) so the camera
     // doesn't clip through terrain or buildings. Priority:
@@ -351,6 +444,35 @@ export default function Home() {
       // Show the elevated outline only if a heatmap layer is currently active
       mapRef.current?.setElevatedOutlineVisible(heatmapActiveRef.current);
     }, 500);
+
+    // -----------------------------------------------------------------------
+    // Fetch driving directions to the user's work location
+    // -----------------------------------------------------------------------
+    const work = workLocationRef.current;
+    if (work) {
+      setIsCommuteLoading(true);
+
+      const params = new URLSearchParams({
+        originLat: String(location.lat),
+        originLng: String(location.lng),
+        destLat: String(work.lat),
+        destLng: String(work.lng),
+      });
+
+      fetch(`/api/directions?${params.toString()}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: DirectionsResponse | null) => {
+          if (data) {
+            setCommuteInfo({
+              durationText: data.durationText,
+              distanceText: data.distanceText,
+              encodedPolyline: data.encodedPolyline,
+            });
+          }
+        })
+        .catch((err) => console.error("Directions fetch error:", err))
+        .finally(() => setIsCommuteLoading(false));
+    }
   }, []);
 
   /**
@@ -414,9 +536,21 @@ export default function Home() {
         </div>
       )}
 
-      {/* Heatmap Layer Controls - Bottom Left */}
+      {/* Bottom Left Stack: Commute Panel + Heatmap Controls */}
       {isMapReady && (
-        <div className="absolute bottom-4 left-4 z-20">
+        <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-3">
+          {/* Commute Panel - shown when directions are loading or available */}
+          {(isCommuteLoading || commuteInfo) && (
+            <CommutePanel
+              durationText={commuteInfo?.durationText ?? ""}
+              distanceText={commuteInfo?.distanceText ?? ""}
+              isLoading={isCommuteLoading}
+              onClose={() => {
+                setCommuteInfo(null);
+              }}
+            />
+          )}
+
           <HeatmapPanel
             layers={availableLayers}
             activeLayerId={activeLayerId}
