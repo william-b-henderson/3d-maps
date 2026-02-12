@@ -6,7 +6,10 @@ import {
   useState,
   forwardRef,
   useImperativeHandle,
+  type MutableRefObject,
 } from "react";
+
+import { HEATMAP_ALTITUDE } from "@/lib/heatmap/constants";
 
 /**
  * Camera position for fly animations
@@ -103,6 +106,14 @@ export interface Map3DRef {
   ) => void;
   /** Clear all highlights from the map */
   clearHighlights: () => void;
+  /**
+   * Show or hide the elevated outline that renders above the heatmap.
+   * When the heatmap is toggled off the outline should be hidden since
+   * it floats at an artificial altitude only needed to clear the heatmap.
+   *
+   * @param visible - Whether the elevated outline should be visible
+   */
+  setElevatedOutlineVisible: (visible: boolean) => void;
   /** Get the underlying Map3DElement for direct access (e.g. heatmap overlays) */
   getMapElement: () => google.maps.maps3d.Map3DElement | null;
 }
@@ -299,8 +310,15 @@ function ensureClosedRing(
  * Shared logic for rendering a building highlight polygon on the map.
  * Used by highlightBuilding, highlightBounds, and highlightLocation.
  *
+ * Creates two polygons:
+ * 1. An extruded polygon at the building's roof height (always visible).
+ * 2. An elevated flat outline above the heatmap altitude so the stroke
+ *    is not tinted by the heatmap.  This outline can be shown/hidden
+ *    independently via the elevatedOutlineRef.
+ *
  * @param mapElement - The Map3DElement to attach polygons to
  * @param highlightElements - Ref array tracking added elements for cleanup
+ * @param elevatedOutlineRef - Mutable ref that receives the elevated outline element
  * @param coords - Closed coordinate ring for the polygon
  * @param altitude - Altitude for the polygon top
  * @param altitudeMode - Whether altitude is above sea level or above ground
@@ -311,6 +329,7 @@ function ensureClosedRing(
 async function renderBuildingPolygon(
   mapElement: google.maps.maps3d.Map3DElement,
   highlightElements: HTMLElement[],
+  elevatedOutlineRef: MutableRefObject<google.maps.maps3d.Polygon3DElement | null>,
   coords: Array<{ lat: number; lng: number }>,
   altitude: number,
   altitudeMode: PolygonAltitudeMode,
@@ -325,6 +344,7 @@ async function renderBuildingPolygon(
   // Clear existing highlights
   highlightElements.forEach((el) => el.remove());
   highlightElements.length = 0;
+  elevatedOutlineRef.current = null;
 
   // Main polygon at building roof height, extruded down to ground
   const polygon = createExtrudedPolygon(
@@ -338,6 +358,30 @@ async function renderBuildingPolygon(
   );
   mapElement.appendChild(polygon);
   highlightElements.push(polygon);
+
+  // Elevated flat outline that renders above the heatmap layer.
+  // Sits at HEATMAP_ALTITUDE + 10m (RELATIVE_TO_GROUND) so it is always
+  // above the heatmap polygons, giving a crisp untainted stroke.
+  const elevatedCoords = coords.map((coord) => ({
+    lat: coord.lat,
+    lng: coord.lng,
+    altitude: HEATMAP_ALTITUDE + 10,
+  }));
+
+  const outlinePolygon = new Polygon3DElement({
+    altitudeMode: "RELATIVE_TO_GROUND",
+    fillColor: "rgba(0, 0, 0, 0)",
+    strokeColor,
+    strokeWidth,
+    extruded: false,
+    drawsOccludedSegments: true,
+  });
+  outlinePolygon.outerCoordinates = elevatedCoords;
+  // Don't append to the DOM yet — the outline starts detached.
+  // setElevatedOutlineVisible(true) is the only path that attaches it,
+  // ensuring it only shows when the heatmap layer is active.
+  highlightElements.push(outlinePolygon);
+  elevatedOutlineRef.current = outlinePolygon;
 }
 
 /**
@@ -361,11 +405,66 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.maps3d.Map3DElement | null>(null);
   const highlightElementsRef = useRef<HTMLElement[]>([]);
+  /** Tracks the elevated outline polygon so it can be shown/hidden
+   *  independently when the heatmap is toggled on/off. */
+  const elevatedOutlineRef = useRef<google.maps.maps3d.Polygon3DElement | null>(null);
   /** Tracks the current orbit animation-end listener so it can be removed if
    *  `orbitProperty` is called again before the fly-to completes. */
   const orbitListenerRef = useRef<(() => void) | null>(null);
+  /** Tracks the abort controller for user-interaction listeners that stop the orbit. */
+  const interactionAbortRef = useRef<AbortController | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * Removes any active user-interaction listeners (mousedown, touchstart, wheel)
+   * that were registered to stop the orbit animation on user input.
+   */
+  const cleanupInteractionListeners = () => {
+    if (interactionAbortRef.current) {
+      interactionAbortRef.current.abort();
+      interactionAbortRef.current = null;
+    }
+  };
+
+  /**
+   * Attaches user-interaction listeners (mousedown, touchstart, wheel) on the
+   * map container. When any fires, the orbit animation is stopped and all
+   * listeners are cleaned up so normal map interaction resumes.
+   */
+  const attachInteractionListeners = () => {
+    const map = mapRef.current;
+    const container = containerRef.current;
+    if (!map || !container) return;
+
+    // Clean up any prior listeners before attaching new ones
+    cleanupInteractionListeners();
+
+    const controller = new AbortController();
+    interactionAbortRef.current = controller;
+
+    const stopOrbit = () => {
+      map.stopCameraAnimation();
+
+      // Also clean up any pending orbit animation-end listener
+      if (orbitListenerRef.current) {
+        map.removeEventListener("gmp-animationend", orbitListenerRef.current);
+        orbitListenerRef.current = null;
+      }
+
+      cleanupInteractionListeners();
+    };
+
+    const opts: AddEventListenerOptions = {
+      signal: controller.signal,
+      capture: true,
+    };
+
+    container.addEventListener("mousedown", stopOrbit, opts);
+    container.addEventListener("touchstart", stopOrbit, opts);
+    container.addEventListener("wheel", stopOrbit, opts);
+    container.addEventListener("pointerdown", stopOrbit, opts);
+  };
 
   // Expose methods via ref
   useImperativeHandle(ref, () => ({
@@ -393,6 +492,12 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
       if (mapRef.current) {
         mapRef.current.stopCameraAnimation();
       }
+      // Also clean up orbit-related listeners
+      if (orbitListenerRef.current && mapRef.current) {
+        mapRef.current.removeEventListener("gmp-animationend", orbitListenerRef.current);
+        orbitListenerRef.current = null;
+      }
+      cleanupInteractionListeners();
     },
 
     orbitProperty: (position: CameraPosition, flyDurationMs = 3000) => {
@@ -408,6 +513,9 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
         orbitListenerRef.current = null;
       }
 
+      // Clean up any active user-interaction listeners from a previous orbit
+      cleanupInteractionListeners();
+
       // Stop any in-progress animation before starting the new fly-to
       map.stopCameraAnimation();
 
@@ -422,34 +530,35 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
         range: position.range ?? 100,
       };
 
-      // Track whether the fly-to has started so we can ignore any stale
-      // gmp-animationend events fired by stopCameraAnimation above.
-      let flyStarted = false;
+      // Use a setTimeout to let any stale gmp-animationend events from
+      // stopCameraAnimation flush before we register our listener and
+      // start the fly-to animation. This avoids the race condition where
+      // a { once: true } listener gets consumed by a stale event.
+      setTimeout(() => {
+        // Phase 2 handler: when fly-to completes, begin a slow continuous orbit
+        const onAnimationEnd = () => {
+          map.removeEventListener("gmp-animationend", onAnimationEnd);
+          orbitListenerRef.current = null;
 
-      // Phase 2 handler: when fly-to completes, begin a slow continuous orbit
-      const onAnimationEnd = () => {
-        if (!flyStarted) return; // ignore stale event from stopCameraAnimation
-        orbitListenerRef.current = null;
-        map.flyCameraAround({
-          camera: targetCamera,
-          durationMillis: 60000, // 60 seconds per full revolution
-          repeatCount: 999, // effectively infinite; user interaction stops it
-        });
-      };
+          map.flyCameraAround({
+            camera: targetCamera,
+            durationMillis: 60000, // 60 seconds per full revolution
+            repeatCount: 999, // effectively infinite
+          });
 
-      orbitListenerRef.current = onAnimationEnd;
-      map.addEventListener("gmp-animationend", onAnimationEnd, { once: true });
+          // Attach user-interaction listeners to stop the orbit on any input
+          attachInteractionListeners();
+        };
 
-      // Phase 1: Fly to the property (start after listener is registered)
-      // Use a microtask to ensure any stale animationend from
-      // stopCameraAnimation flushes before we mark flyStarted = true.
-      queueMicrotask(() => {
-        flyStarted = true;
+        orbitListenerRef.current = onAnimationEnd;
+        map.addEventListener("gmp-animationend", onAnimationEnd);
+
+        // Phase 1: Fly to the property
         map.flyCameraTo({
           endCamera: targetCamera,
           durationMillis: flyDurationMs,
         });
-      });
+      }, 100);
     },
 
     /**
@@ -476,6 +585,7 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
         await renderBuildingPolygon(
           mapRef.current,
           highlightElementsRef.current,
+          elevatedOutlineRef,
           circleCoords,
           height,
           "RELATIVE_TO_GROUND",
@@ -514,6 +624,7 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
         await renderBuildingPolygon(
           mapRef.current,
           highlightElementsRef.current,
+          elevatedOutlineRef,
           closedRing,
           height,
           "ABSOLUTE",
@@ -549,6 +660,7 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
         await renderBuildingPolygon(
           mapRef.current,
           highlightElementsRef.current,
+          elevatedOutlineRef,
           rectCoords,
           height,
           "ABSOLUTE",
@@ -564,6 +676,22 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
     clearHighlights: () => {
       highlightElementsRef.current.forEach((el) => el.remove());
       highlightElementsRef.current = [];
+      elevatedOutlineRef.current = null;
+    },
+
+    setElevatedOutlineVisible: (visible: boolean) => {
+      const outline = elevatedOutlineRef.current;
+      if (!outline) return;
+
+      if (visible) {
+        // Re-attach to the map if it was previously detached
+        if (!outline.parentElement && mapRef.current) {
+          mapRef.current.appendChild(outline);
+        }
+      } else {
+        // Detach from the map DOM to hide it without destroying it
+        outline.remove();
+      }
     },
 
     getMapElement: () => mapRef.current,
@@ -624,7 +752,9 @@ const Map3D = forwardRef<Map3DRef, Map3DProps>(function Map3D(
     initMap();
     return () => {
       mounted = false;
+      cleanupInteractionListeners();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [center.lat, center.lng, center.altitude, tilt, heading, range, mode, onReady]);
 
   if (error) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import Map3D, { Map3DRef } from "@/components/Map3D";
 import AddressSearch, { GeocodedLocation } from "@/components/AddressSearch";
 import HeatmapPanel from "@/components/HeatmapPanel";
@@ -54,9 +54,8 @@ export default function Home() {
   const [selectedLocation, setSelectedLocation] = useState(LOCATIONS[0]);
   const [mapMode, setMapMode] = useState<"hybrid" | "satellite">("hybrid");
   const [isMapReady, setIsMapReady] = useState(false);
-  const [lastSearchedAddress, setLastSearchedAddress] = useState<string | null>(
-    null
-  );
+  const [lastSearchedLocation, setLastSearchedLocation] =
+    useState<GeocodedLocation | null>(null);
   const mapRef = useRef<Map3DRef>(null);
   const [mapElement, setMapElement] = useState<google.maps.maps3d.Map3DElement | null>(null);
 
@@ -80,12 +79,29 @@ export default function Home() {
   } = useHeatmapLayers(mapElement);
 
   /**
+   * Ref that tracks whether a heatmap layer is currently active.
+   * Used inside callbacks (like handleLocationFound) to avoid stale
+   * closures over the activeLayerId state value.
+   */
+  const heatmapActiveRef = useRef(false);
+  heatmapActiveRef.current = activeLayerId !== null;
+
+  /**
+   * Show the elevated outline (above the heatmap) only when a heatmap layer
+   * is active.  When the heatmap is off, the floating outline at 40m would
+   * look out of place, so we hide it.
+   */
+  useEffect(() => {
+    mapRef.current?.setElevatedOutlineVisible(activeLayerId !== null);
+  }, [activeLayerId]);
+
+  /**
    * Handles when an address is found via geocoding.
    * Uses the building outline polygon when available for a precise footprint
    * highlight; falls back to a circular highlight otherwise.
    */
   const handleLocationFound = useCallback((location: GeocodedLocation) => {
-    setLastSearchedAddress(location.formattedAddress);
+    setLastSearchedLocation(location);
 
     // Clear any existing highlights
     mapRef.current?.clearHighlights();
@@ -133,34 +149,40 @@ export default function Home() {
       : 10;
 
     const highlightStyle = {
-      fillColor: "rgba(234, 67, 53, 0.3)",
-      strokeColor: "#EA4335",
+      fillColor: "rgba(0, 0, 0, 0)",
+      strokeColor: "#FFFFFF",
       strokeWidth: 4,
     };
 
-    // Add highlight after a short delay to let the camera start moving
+    // Add highlight after a short delay to let the camera start moving.
+    // The callback is async so we can await the highlight method (which
+    // internally awaits renderBuildingPolygon) before toggling the
+    // elevated outline visibility based on whether the heatmap is active.
     // Priority: 1) outline+height  2) bounds+height  3) circular fallback
-    setTimeout(() => {
+    setTimeout(async () => {
       if (location.buildingOutline) {
         // Best: precise building footprint from Geocoding API
-        mapRef.current?.highlightBuilding(location.buildingOutline, {
+        await mapRef.current?.highlightBuilding(location.buildingOutline, {
           height: roofHeight,
           ...highlightStyle,
         });
       } else if (location.buildingBounds) {
         // Good: bounding box rectangle from Solar API
-        mapRef.current?.highlightBounds(location.buildingBounds, {
+        await mapRef.current?.highlightBounds(location.buildingBounds, {
           height: roofHeight,
           ...highlightStyle,
         });
       } else {
         // Fallback: circular highlight when no building data is available
-        mapRef.current?.highlightLocation(location.lat, location.lng, {
+        await mapRef.current?.highlightLocation(location.lat, location.lng, {
           radius: 12,
           height: roofHeight,
           ...highlightStyle,
         });
       }
+
+      // Show the elevated outline only if a heatmap layer is currently active
+      mapRef.current?.setElevatedOutlineVisible(heatmapActiveRef.current);
     }, 500);
   }, []);
 
@@ -170,7 +192,7 @@ export default function Home() {
    */
   const handleLocationClick = useCallback((location: (typeof LOCATIONS)[0]) => {
     setSelectedLocation(location);
-    setLastSearchedAddress(null);
+    setLastSearchedLocation(null);
 
     // Stop any active orbit animation and clear highlights
     mapRef.current?.stopAnimation();
@@ -212,12 +234,16 @@ export default function Home() {
         />
       </div>
 
-      {/* Last searched address indicator */}
-      {lastSearchedAddress && (
-        <div className="absolute top-20 left-4 right-4 z-20 flex justify-center pointer-events-none">
-          <div className="bg-black/40 backdrop-blur-sm text-white text-sm px-4 py-2 rounded-full">
-            📍 {lastSearchedAddress}
-          </div>
+      {/* Last searched address indicator - clickable to re-fly */}
+      {lastSearchedLocation && (
+        <div className="absolute top-20 left-4 right-4 z-20 flex justify-center">
+          <button
+            type="button"
+            onClick={() => handleLocationFound(lastSearchedLocation)}
+            className="bg-black/40 backdrop-blur-sm text-white text-sm px-4 py-2 rounded-full cursor-pointer hover:bg-black/60 active:scale-95 transition-all duration-200"
+          >
+            📍 {lastSearchedLocation.formattedAddress}
+          </button>
         </div>
       )}
 
