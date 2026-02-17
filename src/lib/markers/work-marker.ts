@@ -2,8 +2,9 @@
  * Work location 3D marker helper.
  *
  * Creates and removes a Google Maps `Marker3DElement` to highlight the user's
- * work address on the 3D map. The marker is extruded (a vertical line connects
- * the pin to the ground) and labelled "Work" so it's immediately identifiable.
+ * work address on the 3D map. The marker is extruded and rendered as a
+ * glass-card label with a briefcase icon and "Work" text, matching the
+ * style used for nearby-place markers.
  *
  * Note: `Marker3DElement` is part of the `maps3d` library but is not yet
  * included in `@types/google.maps`, so we use type assertions when
@@ -11,6 +12,7 @@
  */
 
 import type { WorkLocation } from "@/lib/onboarding/types";
+import { buildGlassCardTemplate } from "@/lib/markers/place-marker";
 
 // ---------------------------------------------------------------------------
 // Marker3DElement type shim
@@ -24,7 +26,6 @@ interface Marker3DOptions {
   position: { lat: number; lng: number; altitude: number };
   altitudeMode: string;
   extruded: boolean;
-  label: string;
   collisionBehavior: string;
   drawsWhenOccluded: boolean;
 }
@@ -42,7 +43,8 @@ interface Maps3DLibraryWithMarker extends google.maps.Maps3DLibrary {
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a 3D marker on the map at the given work location.
+ * Creates a 3D marker on the map at the given work location, rendered as
+ * a glass-card label with a briefcase icon and "Work" text.
  *
  * The marker uses `RELATIVE_TO_GROUND` altitude mode and `extruded: true` so
  * a vertical line connects the pin to the terrain, making it highly visible
@@ -68,10 +70,13 @@ export async function createWorkMarker(
     },
     altitudeMode: "RELATIVE_TO_GROUND",
     extruded: true,
-    label: "Work",
     collisionBehavior: "REQUIRED",
     drawsWhenOccluded: true,
   });
+
+  // Append glass-card template with briefcase icon
+  const template = buildGlassCardTemplate("\uD83D\uDCBC", "Work");
+  marker.appendChild(template);
 
   mapElement.appendChild(marker);
   return marker;

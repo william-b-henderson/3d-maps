@@ -14,7 +14,11 @@ import { createWorkMarker, removeWorkMarker } from "@/lib/markers/work-marker";
 import { renderRoute, removeRoute } from "@/lib/routes/route-renderer";
 import { decodePolyline } from "@/lib/routes/polyline-decoder";
 import CommutePanel from "@/components/CommutePanel";
+import NearbyPlacesPanel from "@/components/NearbyPlacesPanel";
+import { createPlaceMarker, createSearchedAddressMarker, removePlaceMarker } from "@/lib/markers/place-marker";
+import { getActiveCategories, NEARBY_CATEGORIES } from "@/lib/nearby/categories";
 import type { DirectionsResponse } from "@/app/api/directions/route";
+import type { NearbyPlaceResult, NearbyPlacesResponse } from "@/app/api/nearby-places/route";
 import type { WorkLocation } from "@/lib/onboarding/types";
 
 /**
@@ -57,6 +61,19 @@ const LOCATIONS = [
     heading: 270,
   },
 ];
+
+/**
+ * Extracts just the street address from a full formatted address string.
+ * E.g. "2140 Divisadero St, San Francisco, CA 94115, USA" => "2140 Divisadero St"
+ *
+ * @param formattedAddress - The full address returned by the Geocoding API.
+ * @returns The street portion (everything before the first comma), trimmed.
+ */
+function extractStreetAddress(formattedAddress: string): string {
+  const commaIndex = formattedAddress.indexOf(",");
+  if (commaIndex === -1) return formattedAddress.trim();
+  return formattedAddress.substring(0, commaIndex).trim();
+}
 
 /**
  * Home page component displaying a full-screen 3D map with location controls
@@ -118,6 +135,33 @@ export default function Home() {
   /** Tracks the rendered route polyline for cleanup. */
   const routePolylineRef = useRef<google.maps.maps3d.Polyline3DElement | null>(null);
 
+  /** Nearby places results from the batch API (one per active preference). */
+  const [nearbyPlaces, setNearbyPlaces] = useState<NearbyPlaceResult[]>([]);
+
+  /** Whether a nearby places batch request is in flight. */
+  const [isNearbyLoading, setIsNearbyLoading] = useState(false);
+
+  /** Active preference category IDs that should trigger a nearby search. */
+  const [activePreferences, setActivePreferences] = useState<string[]>([]);
+
+  /** Category currently hovered in the NearbyPlacesPanel (for route highlighting). */
+  const [hoveredCategory, setHoveredCategory] = useState<string | null>(null);
+
+  /** Whether the commute panel is collapsed (data preserved, map elements hidden). */
+  const [isCommuteCollapsed, setIsCommuteCollapsed] = useState(false);
+
+  /** Whether the nearby places panel is collapsed (data preserved, map elements hidden). */
+  const [isNearbyCollapsed, setIsNearbyCollapsed] = useState(false);
+
+  /** Tracks the rendered searched-address marker for cleanup. */
+  const searchMarkerRef = useRef<HTMLElement | null>(null);
+
+  /** Tracks rendered place marker elements by category for cleanup. */
+  const placeMarkersRef = useRef<Map<string, HTMLElement>>(new Map());
+
+  /** Tracks rendered walking route polylines by category for cleanup. */
+  const walkingRoutesRef = useRef<Map<string, google.maps.maps3d.Polyline3DElement>>(new Map());
+
   /** Tracks rendered polygon elements so we can add/remove individually. */
   const neighborhoodPolygonsRef = useRef<Map<string, google.maps.maps3d.Polygon3DElement>>(new Map());
 
@@ -131,6 +175,7 @@ export default function Home() {
       setOnboardingDone(true);
       setActiveNeighborhoods(data.neighborhoods);
       setWorkLocation(data.workLocation);
+      setActivePreferences(getActiveCategories(data.preferences));
     }
   }, []);
 
@@ -164,15 +209,63 @@ export default function Home() {
   }, [mapElement, workLocation]);
 
   // ---------------------------------------------------------------------------
+  // Searched-address 3D marker
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Renders a glass-card marker at the searched address showing just the
+   * street portion (e.g. "2140 Divisadero St"). Hidden when the nearby
+   * places panel is collapsed. Cleans up on collapse / re-render / unmount.
+   */
+  useEffect(() => {
+    if (!mapElement || !lastSearchedLocation || isNearbyCollapsed) return;
+
+    let cancelled = false;
+
+    const street = extractStreetAddress(lastSearchedLocation.formattedAddress);
+
+    // Compute marker altitude so it floats above the building rooftop.
+    // buildingHeightMeters is absolute (above sea level) so we subtract
+    // terrain elevation to get the height above ground for RELATIVE_TO_GROUND.
+    const { buildingHeightMeters, elevationMeters } = lastSearchedLocation;
+    let markerAltitude = 0;
+    if (buildingHeightMeters != null && elevationMeters != null) {
+      markerAltitude = buildingHeightMeters - elevationMeters;
+    } else if (elevationMeters != null) {
+      markerAltitude = 10; // default ~1 storey above ground
+    }
+
+    createSearchedAddressMarker(mapElement, {
+      lat: lastSearchedLocation.lat,
+      lng: lastSearchedLocation.lng,
+      streetAddress: street,
+      altitude: markerAltitude,
+    }).then((marker) => {
+      if (cancelled) {
+        removePlaceMarker(marker);
+        return;
+      }
+      searchMarkerRef.current = marker;
+    });
+
+    return () => {
+      cancelled = true;
+      removePlaceMarker(searchMarkerRef.current);
+      searchMarkerRef.current = null;
+    };
+  }, [mapElement, lastSearchedLocation, isNearbyCollapsed]);
+
+  // ---------------------------------------------------------------------------
   // Route polyline rendering
   // ---------------------------------------------------------------------------
 
   /**
    * Renders the driving route polyline on the map whenever commute info
-   * is available. Cleans up the previous polyline on re-render or unmount.
+   * is available and the panel is not collapsed. Cleans up the polyline
+   * when collapsed, re-rendered, or unmounted.
    */
   useEffect(() => {
-    if (!mapElement || !commuteInfo) return;
+    if (!mapElement || !commuteInfo || isCommuteCollapsed) return;
 
     let cancelled = false;
 
@@ -190,7 +283,132 @@ export default function Home() {
       removeRoute(routePolylineRef.current);
       routePolylineRef.current = null;
     };
-  }, [mapElement, commuteInfo]);
+  }, [mapElement, commuteInfo, isCommuteCollapsed]);
+
+  // ---------------------------------------------------------------------------
+  // Nearby place markers (one per active preference category)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Renders a 3D marker for each nearby-place result whenever the map is
+   * ready, results are available, and the panel is not collapsed. Cleans
+   * up all markers when collapsed, re-rendered, or unmounted.
+   */
+  useEffect(() => {
+    if (!mapElement || nearbyPlaces.length === 0 || isNearbyCollapsed) return;
+
+    let cancelled = false;
+
+    async function renderMarkers() {
+      for (const result of nearbyPlaces) {
+        if (cancelled) break;
+
+        const marker = await createPlaceMarker(mapElement!, {
+          lat: result.lat,
+          lng: result.lng,
+          name: result.name,
+          category: result.category,
+        });
+
+        if (cancelled) {
+          removePlaceMarker(marker);
+        } else {
+          placeMarkersRef.current.set(result.category, marker);
+        }
+      }
+    }
+
+    renderMarkers();
+
+    return () => {
+      cancelled = true;
+      for (const marker of placeMarkersRef.current.values()) {
+        removePlaceMarker(marker);
+      }
+      placeMarkersRef.current.clear();
+    };
+  }, [mapElement, nearbyPlaces, isNearbyCollapsed]);
+
+  // ---------------------------------------------------------------------------
+  // Walking route polylines (one per nearby place)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Renders a coloured walking-route polyline for each nearby-place result
+   * that has an encoded polyline. Each route uses the category-specific
+   * colour defined in NEARBY_CATEGORIES. Hidden when the panel is collapsed.
+   * Cleans up on collapse / re-render / unmount.
+   */
+  useEffect(() => {
+    if (!mapElement || nearbyPlaces.length === 0 || isNearbyCollapsed) return;
+
+    let cancelled = false;
+
+    async function renderWalkingRoutes() {
+      for (const result of nearbyPlaces) {
+        if (cancelled) break;
+        if (!result.encodedPolyline) continue;
+
+        const cat = NEARBY_CATEGORIES[result.category];
+        const color = cat?.routeColor ?? "rgba(107, 114, 128, 0.85)";
+
+        const coords = decodePolyline(result.encodedPolyline);
+        const polyline = await renderRoute(mapElement!, coords, {
+          strokeColor: color,
+          strokeWidth: 8,
+        });
+
+        if (cancelled) {
+          removeRoute(polyline);
+        } else {
+          walkingRoutesRef.current.set(result.category, polyline);
+        }
+      }
+    }
+
+    renderWalkingRoutes();
+
+    return () => {
+      cancelled = true;
+      for (const polyline of walkingRoutesRef.current.values()) {
+        removeRoute(polyline);
+      }
+      walkingRoutesRef.current.clear();
+    };
+  }, [mapElement, nearbyPlaces, isNearbyCollapsed]);
+
+  // ---------------------------------------------------------------------------
+  // Walking route hover highlighting
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Highlights the walking route for the currently hovered category in the
+   * NearbyPlacesPanel. The hovered route gets a wider, fully-opaque stroke
+   * while all other routes are dimmed. Resets when nothing is hovered.
+   */
+  useEffect(() => {
+    const routes = walkingRoutesRef.current;
+    if (routes.size === 0) return;
+
+    for (const [category, polyline] of routes) {
+      const cat = NEARBY_CATEGORIES[category];
+      const baseColor = cat?.routeColor ?? "rgba(107, 114, 128, 0.85)";
+
+      if (hoveredCategory === null) {
+        // No hover — restore all routes to their default style
+        polyline.strokeWidth = 8;
+        polyline.strokeColor = baseColor;
+      } else if (category === hoveredCategory) {
+        // Highlighted route: wider, full opacity
+        polyline.strokeWidth = 14;
+        polyline.strokeColor = baseColor.replace(/[\d.]+\)$/, "1)");
+      } else {
+        // Dimmed route: thinner, reduced opacity
+        polyline.strokeWidth = 5;
+        polyline.strokeColor = baseColor.replace(/[\d.]+\)$/, "0.3)");
+      }
+    }
+  }, [hoveredCategory]);
 
   /**
    * Sync polygon elements on the map whenever activeNeighborhoods or
@@ -354,6 +572,13 @@ export default function Home() {
   workLocationRef.current = workLocation;
 
   /**
+   * Ref that tracks the current active preferences so handleLocationFound
+   * can access them without being re-created when preferences change.
+   */
+  const activePreferencesRef = useRef<string[]>([]);
+  activePreferencesRef.current = activePreferences;
+
+  /**
    * Handles when an address is found via geocoding.
    * Uses the building outline polygon when available for a precise footprint
    * highlight; falls back to a circular highlight otherwise.
@@ -362,9 +587,12 @@ export default function Home() {
   const handleLocationFound = useCallback((location: GeocodedLocation) => {
     setLastSearchedLocation(location);
 
-    // Clear any existing highlights and previous commute data
+    // Clear any existing highlights and previous data
     mapRef.current?.clearHighlights();
     setCommuteInfo(null);
+    setNearbyPlaces([]);
+    setIsCommuteCollapsed(false);
+    setIsNearbyCollapsed(false);
 
     // Compute orbit center altitude (meters above sea level) so the camera
     // doesn't clip through terrain or buildings. Priority:
@@ -473,6 +701,30 @@ export default function Home() {
         .catch((err) => console.error("Directions fetch error:", err))
         .finally(() => setIsCommuteLoading(false));
     }
+
+    // -----------------------------------------------------------------------
+    // Fetch nearby places for all active preference categories
+    // -----------------------------------------------------------------------
+    const cats = activePreferencesRef.current;
+    if (cats.length > 0) {
+      setIsNearbyLoading(true);
+
+      const nearbyParams = new URLSearchParams({
+        lat: String(location.lat),
+        lng: String(location.lng),
+        categories: cats.join(","),
+      });
+
+      fetch(`/api/nearby-places?${nearbyParams.toString()}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: NearbyPlacesResponse | null) => {
+          if (data?.results) {
+            setNearbyPlaces(data.results);
+          }
+        })
+        .catch((err) => console.error("Nearby places fetch error:", err))
+        .finally(() => setIsNearbyLoading(false));
+    }
   }, []);
 
   /**
@@ -536,7 +788,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Bottom Left Stack: Commute Panel + Heatmap Controls */}
+      {/* Bottom Left Stack: Commute + Coffee + Heatmap Controls */}
       {isMapReady && (
         <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-3">
           {/* Commute Panel - shown when directions are loading or available */}
@@ -545,9 +797,22 @@ export default function Home() {
               durationText={commuteInfo?.durationText ?? ""}
               distanceText={commuteInfo?.distanceText ?? ""}
               isLoading={isCommuteLoading}
-              onClose={() => {
-                setCommuteInfo(null);
-              }}
+              isCollapsed={isCommuteCollapsed}
+              onCollapse={() => setIsCommuteCollapsed(true)}
+              onExpand={() => setIsCommuteCollapsed(false)}
+            />
+          )}
+
+          {/* Nearby Places Panel - shown when batch search is loading or has results */}
+          {(isNearbyLoading || nearbyPlaces.length > 0) && (
+            <NearbyPlacesPanel
+              results={nearbyPlaces}
+              isLoading={isNearbyLoading}
+              hoveredCategory={hoveredCategory}
+              onHover={setHoveredCategory}
+              isCollapsed={isNearbyCollapsed}
+              onCollapse={() => setIsNearbyCollapsed(true)}
+              onExpand={() => setIsNearbyCollapsed(false)}
             />
           )}
 

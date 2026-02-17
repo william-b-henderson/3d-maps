@@ -15,15 +15,27 @@
 // ---------------------------------------------------------------------------
 
 /**
- * Renders a driving route on the 3D map as a styled polyline.
+ * Options for customising the rendered route polyline.
+ */
+export interface RenderRouteOptions {
+  /** Stroke colour (any CSS colour string). Defaults to blue-500. */
+  strokeColor?: string;
+  /** Stroke width in pixels. Defaults to 10. */
+  strokeWidth?: number;
+}
+
+/**
+ * Renders a route on the 3D map as a styled polyline.
  *
  * @param mapElement - The live `Map3DElement` to append the polyline to.
  * @param coords - Array of {lat, lng} coordinates representing the route path.
+ * @param options - Optional style overrides (colour, width).
  * @returns The created `Polyline3DElement` for later cleanup.
  */
 export async function renderRoute(
   mapElement: google.maps.maps3d.Map3DElement,
-  coords: Array<{ lat: number; lng: number }>
+  coords: Array<{ lat: number; lng: number }>,
+  options?: RenderRouteOptions
 ): Promise<google.maps.maps3d.Polyline3DElement> {
   const { Polyline3DElement } = (await google.maps.importLibrary(
     "maps3d"
@@ -31,8 +43,8 @@ export async function renderRoute(
 
   const polyline = new Polyline3DElement({
     altitudeMode: "CLAMP_TO_GROUND" as google.maps.maps3d.AltitudeMode,
-    strokeColor: "rgba(59, 130, 246, 0.9)", // blue-500
-    strokeWidth: 10,
+    strokeColor: options?.strokeColor ?? "rgba(59, 130, 246, 0.9)", // blue-500
+    strokeWidth: options?.strokeWidth ?? 10,
     drawsOccludedSegments: true,
   });
 
