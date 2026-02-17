@@ -8,6 +8,7 @@
  */
 
 import type { HeatmapLayerConfig } from "@/lib/heatmap/types";
+import { getColorScaleCSS } from "@/lib/heatmap/colorScales";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -73,6 +74,29 @@ export default function HeatmapPanel({
           );
         })}
       </div>
+
+      {/* Color legend — only visible when a layer is active */}
+      {activeLayerId && !isLoading && (() => {
+        const activeLayer = layers.find((l) => l.id === activeLayerId);
+        if (!activeLayer) return null;
+
+        return (
+          <div className="mt-3">
+            <div
+              className="h-1.5 w-full rounded-full"
+              style={{ background: getColorScaleCSS(activeLayer.colorScale) }}
+            />
+            <div className="flex items-center justify-between mt-1">
+              <span className="text-xs text-white/60">
+                {activeLayer.legendLowLabel ?? "Low"}
+              </span>
+              <span className="text-xs text-white/60">
+                {activeLayer.legendHighLabel ?? "High"}
+              </span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Opacity slider — only visible when a layer is active */}
       {activeLayerId && !isLoading && (

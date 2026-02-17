@@ -159,6 +159,21 @@ export function buildColorLUT(scaleId: ColorScaleId, opacity: number): string[] 
 }
 
 /**
+ * Returns a CSS `linear-gradient` string for a given colour scale.
+ * Useful for rendering a legend gradient bar in the UI.
+ *
+ * @param scaleId - Which built-in colour scale to use
+ * @returns A CSS linear-gradient value (e.g. `linear-gradient(to right, ...)`)
+ */
+export function getColorScaleCSS(scaleId: ColorScaleId): string {
+  const stops = SCALE_STOPS[scaleId];
+  const cssStops = stops
+    .map((s) => `rgb(${s.r}, ${s.g}, ${s.b}) ${(s.pos * 100).toFixed(0)}%`)
+    .join(", ");
+  return `linear-gradient(to right, ${cssStops})`;
+}
+
+/**
  * Clear the LUT cache.  Useful when colour scale parameters change and
  * stale entries should be garbage-collected.
  */

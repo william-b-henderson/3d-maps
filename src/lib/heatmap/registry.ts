@@ -7,23 +7,14 @@
  *
  * ## Adding a new layer
  *
- * 1. Define a generator or loader for your `HeatmapPoint[]` data.
+ * 1. Define a generator or loader for your data.
  * 2. Add an entry to `LAYER_REGISTRY` below with:
- *    - A `config` describing rendering parameters.
- *    - A `source` that is either `{ type: "inline", points }` or
- *      `{ type: "url", url: "/api/heatmap/my-layer" }`.
+ *    - A `config` describing rendering parameters and `renderMode`.
+ *    - A `source` matching the render mode:
+ *      - `"grid"` → `{ type: "inline" }` or `{ type: "url" }`
+ *      - `"streets"` → `{ type: "streets", url }` (returns `StreetSegment[]`)
+ *      - `"intersections"` → `{ type: "intersections", url }` (returns `ScoredIntersection[]`)
  * 3. The layer will automatically appear in the UI.
- *
- * ## Consuming an external API
- *
- * Create a Next.js route handler at `src/app/api/heatmap/[layerId]/route.ts`
- * that fetches from your upstream API, transforms the response into
- * `HeatmapPoint[]` JSON, and returns it.  Then register the layer with
- * `source: { type: "url", url: "/api/heatmap/my-layer" }`.
- *
- * The registry's `loadLayerData` function handles fetching and caching
- * transparently.  For very large upstream datasets, aggregate/downsample
- * server-side to keep the client payload under ~500 points.
  */
 
 import type {
@@ -31,6 +22,8 @@ import type {
   HeatmapLayerConfig,
   RegisteredLayer,
   HeatmapDataSource,
+  StreetSegment,
+  ScoredIntersection,
 } from "./types";
 import {
   SF_BOUNDS,
@@ -39,7 +32,7 @@ import {
   DEFAULT_INTENSITY_THRESHOLD,
   DEFAULT_LAYER_OPACITY,
 } from "./constants";
-import { generateWalkabilityData, generateCrimeData } from "./sampleData";
+import { generateWalkabilityData } from "./sampleData";
 
 // ---------------------------------------------------------------------------
 // Layer definitions
@@ -58,27 +51,50 @@ const LAYER_REGISTRY: RegisteredLayer[] = [
       name: "Walkability",
       description: "Walking-friendliness score by neighbourhood",
       colorScale: "thermal",
+      renderMode: "grid",
       blurRadius: DEFAULT_BLUR_RADIUS,
       gridResolution: DEFAULT_GRID_RESOLUTION,
       bounds: SF_BOUNDS,
       minIntensityThreshold: DEFAULT_INTENSITY_THRESHOLD,
       opacity: DEFAULT_LAYER_OPACITY,
+      legendLowLabel: "Low",
+      legendHighLabel: "High",
     },
-    source: { type: "inline", points: [] }, // populated lazily
+    source: { type: "inline", points: [] },
   },
   {
     config: {
       id: "crime",
       name: "Crime Density",
-      description: "Relative crime incident density",
+      description: "Crime score at each intersection",
       colorScale: "inferno",
+      renderMode: "intersections",
       blurRadius: DEFAULT_BLUR_RADIUS,
       gridResolution: DEFAULT_GRID_RESOLUTION,
       bounds: SF_BOUNDS,
       minIntensityThreshold: DEFAULT_INTENSITY_THRESHOLD,
       opacity: DEFAULT_LAYER_OPACITY,
+      legendLowLabel: "Safe",
+      legendHighLabel: "Dangerous",
     },
-    source: { type: "inline", points: [] },
+    source: { type: "intersections", url: "/api/heatmap/intersections" },
+  },
+  {
+    config: {
+      id: "traffic",
+      name: "Traffic Density",
+      description: "Traffic volume by street segment",
+      colorScale: "thermal",
+      renderMode: "streets",
+      blurRadius: DEFAULT_BLUR_RADIUS,
+      gridResolution: DEFAULT_GRID_RESOLUTION,
+      bounds: SF_BOUNDS,
+      minIntensityThreshold: DEFAULT_INTENSITY_THRESHOLD,
+      opacity: DEFAULT_LAYER_OPACITY,
+      legendLowLabel: "Quiet",
+      legendHighLabel: "Busy",
+    },
+    source: { type: "streets", url: "/api/heatmap/streets" },
   },
 ];
 
@@ -88,15 +104,14 @@ const LAYER_REGISTRY: RegisteredLayer[] = [
  */
 const INLINE_GENERATORS: Record<string, () => HeatmapPoint[]> = {
   walkability: generateWalkabilityData,
-  crime: generateCrimeData,
 };
 
 // ---------------------------------------------------------------------------
 // Cache
 // ---------------------------------------------------------------------------
 
-/** In-memory cache: layerId → loaded points.  Survives across toggles. */
-const dataCache = new Map<string, HeatmapPoint[]>();
+/** In-memory cache: layerId → loaded data (points, segments, or intersections). */
+const dataCache = new Map<string, unknown>();
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -119,13 +134,25 @@ export function getAvailableLayers(): HeatmapLayerConfig[] {
  * @returns The layer config, or `undefined` if not found
  */
 export function getLayerConfig(
-  layerId: string
+  layerId: string,
 ): HeatmapLayerConfig | undefined {
   return LAYER_REGISTRY.find((entry) => entry.config.id === layerId)?.config;
 }
 
 /**
- * Lazily load (and cache) the data points for a heatmap layer.
+ * Get the data source descriptor for a specific layer.
+ *
+ * @param layerId - Unique layer identifier
+ * @returns The source descriptor, or `undefined` if not found
+ */
+export function getLayerSource(
+  layerId: string,
+): HeatmapDataSource | undefined {
+  return LAYER_REGISTRY.find((entry) => entry.config.id === layerId)?.source;
+}
+
+/**
+ * Lazily load (and cache) the data points for a grid-mode heatmap layer.
  *
  * - **Inline sources** with a registered generator run the generator once.
  * - **URL sources** fetch from the network once and cache the result.
@@ -137,11 +164,10 @@ export function getLayerConfig(
  * @throws If the layer is not found in the registry
  */
 export async function loadLayerData(
-  layerId: string
+  layerId: string,
 ): Promise<HeatmapPoint[]> {
-  // Return from cache if available
   const cached = dataCache.get(layerId);
-  if (cached) return cached;
+  if (cached) return cached as HeatmapPoint[];
 
   const entry = LAYER_REGISTRY.find((e) => e.config.id === layerId);
   if (!entry) throw new Error(`Heatmap layer "${layerId}" not found in registry`);
@@ -149,16 +175,60 @@ export async function loadLayerData(
   let points: HeatmapPoint[];
 
   if (entry.source.type === "inline") {
-    // Run the generator if one exists; otherwise use whatever is in `points`
     const gen = INLINE_GENERATORS[layerId];
     points = gen ? gen() : (entry.source as { type: "inline"; points: HeatmapPoint[] }).points;
+  } else if (entry.source.type === "url") {
+    points = await fetchJSON<HeatmapPoint[]>(entry.source.url);
   } else {
-    // Fetch from URL
-    points = await fetchLayerData(entry.source);
+    throw new Error(`loadLayerData called on non-grid layer "${layerId}"`);
   }
 
   dataCache.set(layerId, points);
   return points;
+}
+
+/**
+ * Lazily load (and cache) street segment data for a streets-mode layer.
+ *
+ * @param layerId - Unique layer identifier
+ * @returns The array of street segments
+ */
+export async function loadStreetData(
+  layerId: string,
+): Promise<StreetSegment[]> {
+  const cached = dataCache.get(layerId);
+  if (cached) return cached as StreetSegment[];
+
+  const entry = LAYER_REGISTRY.find((e) => e.config.id === layerId);
+  if (!entry || entry.source.type !== "streets") {
+    throw new Error(`Layer "${layerId}" is not a streets source`);
+  }
+
+  const segments = await fetchJSON<StreetSegment[]>(entry.source.url);
+  dataCache.set(layerId, segments);
+  return segments;
+}
+
+/**
+ * Lazily load (and cache) intersection data for an intersections-mode layer.
+ *
+ * @param layerId - Unique layer identifier
+ * @returns The array of scored intersections
+ */
+export async function loadIntersectionData(
+  layerId: string,
+): Promise<ScoredIntersection[]> {
+  const cached = dataCache.get(layerId);
+  if (cached) return cached as ScoredIntersection[];
+
+  const entry = LAYER_REGISTRY.find((e) => e.config.id === layerId);
+  if (!entry || entry.source.type !== "intersections") {
+    throw new Error(`Layer "${layerId}" is not an intersections source`);
+  }
+
+  const intersections = await fetchJSON<ScoredIntersection[]>(entry.source.url);
+  dataCache.set(layerId, intersections);
+  return intersections;
 }
 
 /**
@@ -180,39 +250,15 @@ export function invalidateCache(layerId?: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch heatmap point data from a URL source.
+ * Fetch JSON data from a URL.
  *
- * Currently supports JSON responses in the shape `HeatmapPoint[]`.
- * Extend the parser switch below for CSV or binary formats.
- *
- * @param source - The URL data source descriptor
- * @returns Parsed array of heatmap points
+ * @param url - The URL to fetch from
+ * @returns Parsed JSON response
  */
-async function fetchLayerData(
-  source: Extract<HeatmapDataSource, { type: "url" }>
-): Promise<HeatmapPoint[]> {
-  const res = await fetch(source.url);
+async function fetchJSON<T>(url: string): Promise<T> {
+  const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(
-      `Failed to fetch heatmap data from ${source.url}: ${res.status}`
-    );
+    throw new Error(`Failed to fetch heatmap data from ${url}: ${res.status}`);
   }
-
-  const parser = source.parser ?? "json";
-
-  switch (parser) {
-    case "json":
-      return (await res.json()) as HeatmapPoint[];
-
-    case "csv":
-      // TODO: implement CSV parsing if needed
-      throw new Error("CSV parser not yet implemented");
-
-    case "binary":
-      // TODO: implement binary Float32Array parsing if needed
-      throw new Error("Binary parser not yet implemented");
-
-    default:
-      throw new Error(`Unknown parser: ${parser}`);
-  }
+  return (await res.json()) as T;
 }

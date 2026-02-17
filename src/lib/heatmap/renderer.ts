@@ -15,7 +15,7 @@
  *  - **Zero stroke** — no borders between cells for a seamless look.
  */
 
-import type { HeatmapGrid } from "./types";
+import type { HeatmapGrid, LayerRenderer } from "./types";
 import { POLYGON_BATCH_SIZE, HEATMAP_ALTITUDE } from "./constants";
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ interface CellData {
 // Renderer class
 // ---------------------------------------------------------------------------
 
-export class HeatmapRenderer {
+export class HeatmapRenderer implements LayerRenderer {
   /** Active polygon elements currently attached to the map. */
   private polygons: google.maps.maps3d.Polygon3DElement[] = [];
 
@@ -59,7 +59,8 @@ export class HeatmapRenderer {
    *
    * @param grid - Pre-computed grid from the KDE engine
    */
-  async render(grid: HeatmapGrid): Promise<void> {
+  async render(data: unknown): Promise<void> {
+    const grid = data as HeatmapGrid;
     // Cancel any in-flight render
     this.renderAbort?.abort();
     this.renderAbort = new AbortController();

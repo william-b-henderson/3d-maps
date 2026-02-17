@@ -7,6 +7,7 @@ import AddressSearch, { GeocodedLocation } from "@/components/AddressSearch";
 import HeatmapPanel from "@/components/HeatmapPanel";
 import NeighborhoodPanel from "@/components/NeighborhoodPanel";
 import { useHeatmapLayers } from "@/hooks/useHeatmapLayers";
+import { useMapSearchParams } from "@/hooks/useMapSearchParams";
 import { loadOnboardingData } from "@/lib/onboarding/constants";
 import { getNeighborhoodBoundary } from "@/lib/neighborhoods/boundaries";
 import { ensureGoogleMapsLoaded } from "@/lib/google-maps-loader";
@@ -16,9 +17,15 @@ import { decodePolyline } from "@/lib/routes/polyline-decoder";
 import CommutePanel from "@/components/CommutePanel";
 import NearbyPlacesPanel from "@/components/NearbyPlacesPanel";
 import { createPlaceMarker, createSearchedAddressMarker, removePlaceMarker } from "@/lib/markers/place-marker";
+import { createListingMarker, removeAllListingMarkers } from "@/lib/markers/listing-marker";
 import { getActiveCategories, NEARBY_CATEGORIES } from "@/lib/nearby/categories";
+import ListingFilters from "@/components/ListingFilters";
+import ListingInfoCard from "@/components/ListingInfoCard";
 import type { DirectionsResponse } from "@/app/api/directions/route";
 import type { NearbyPlaceResult, NearbyPlacesResponse } from "@/app/api/nearby-places/route";
+import type { ListingsResponse } from "@/app/api/listings/route";
+import type { ListingDetailResponse } from "@/app/api/listings/[zpid]/route";
+import type { ListingMarkerData, ListingDetail } from "@/lib/types/listing";
 import type { WorkLocation } from "@/lib/onboarding/types";
 
 /**
@@ -97,6 +104,23 @@ export default function Home() {
     setMapElement(mapRef.current?.getMapElement() ?? null);
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // URL-synced state (persists across navigation via search params)
+  // ---------------------------------------------------------------------------
+
+  const {
+    priceRange,
+    setPriceRange,
+    filterNeighborhoods,
+    setFilterNeighborhoods,
+    selectedZpid,
+    setSelectedZpid,
+    activeHeatmapId,
+    setActiveHeatmapId,
+    heatmapOpacity: urlHeatmapOpacity,
+    setHeatmapOpacity: setUrlHeatmapOpacity,
+  } = useMapSearchParams();
+
   const {
     availableLayers,
     activeLayerId,
@@ -104,7 +128,12 @@ export default function Home() {
     opacity: heatmapOpacity,
     toggleLayer,
     setOpacity: setHeatmapOpacity,
-  } = useHeatmapLayers(mapElement);
+  } = useHeatmapLayers(mapElement, {
+    activeLayerId: activeHeatmapId,
+    setActiveLayerId: setActiveHeatmapId,
+    opacity: urlHeatmapOpacity,
+    setOpacity: setUrlHeatmapOpacity,
+  });
 
   // ---------------------------------------------------------------------------
   // Neighborhood outlines
@@ -162,6 +191,38 @@ export default function Home() {
   /** Tracks rendered walking route polylines by category for cleanup. */
   const walkingRoutesRef = useRef<Map<string, google.maps.maps3d.Polyline3DElement>>(new Map());
 
+  /** Tracks rendered listing marker elements for cleanup. */
+  const listingMarkersRef = useRef<HTMLElement[]>([]);
+
+  /** Cache of the last fetched listings (used to restore selection from URL). */
+  const fetchedListingsRef = useRef<ListingMarkerData[]>([]);
+
+  // ---------------------------------------------------------------------------
+  // Listing info card state (selectedListing is local; zpid is URL-synced)
+  // ---------------------------------------------------------------------------
+
+  /** The listing whose marker was clicked (drives the info card). */
+  const [selectedListing, setSelectedListingLocal] = useState<ListingMarkerData | null>(null);
+
+  /** Full detail for the selected listing (fetched from detail API). */
+  const [listingDetail, setListingDetail] = useState<ListingDetail | null>(null);
+
+  /** Whether the detail API request is in flight. */
+  const [isDetailLoading, setIsDetailLoading] = useState(false);
+
+  /**
+   * Selects a listing and syncs the zpid to the URL. Pass `null` to deselect.
+   *
+   * @param listing - The listing marker data to select, or null to clear.
+   */
+  const setSelectedListing = useCallback(
+    (listing: ListingMarkerData | null) => {
+      setSelectedListingLocal(listing);
+      setSelectedZpid(listing?.zpid ?? null);
+    },
+    [setSelectedZpid],
+  );
+
   /** Tracks rendered polygon elements so we can add/remove individually. */
   const neighborhoodPolygonsRef = useRef<Map<string, google.maps.maps3d.Polygon3DElement>>(new Map());
 
@@ -207,6 +268,138 @@ export default function Home() {
       workMarkerRef.current = null;
     };
   }, [mapElement, workLocation]);
+
+  // ---------------------------------------------------------------------------
+  // Listing 3D markers (re-fetched when filters change)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fetches live listings from the API with current filter parameters and
+   * renders a 3D marker for each one. Re-runs whenever the map, price range,
+   * or neighborhood filter changes. Cleans up markers on re-render/unmount.
+   *
+   * After rendering, if a `selectedZpid` is present from the URL but no
+   * listing is selected yet (i.e. the user navigated back), it automatically
+   * re-selects the matching listing and fetches its detail.
+   */
+  useEffect(() => {
+    if (!mapElement) return;
+
+    let cancelled = false;
+
+    async function fetchAndRenderListings() {
+      try {
+        const params = new URLSearchParams();
+        if (priceRange.min != null) params.set("minPrice", String(priceRange.min));
+        if (priceRange.max != null) params.set("maxPrice", String(priceRange.max));
+        if (filterNeighborhoods.length > 0) {
+          params.set("neighborhoods", filterNeighborhoods.join(","));
+        }
+
+        const qs = params.toString();
+        const url = `/api/listings${qs ? `?${qs}` : ""}`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+
+        const data: ListingsResponse = await res.json();
+        fetchedListingsRef.current = data.listings;
+
+        for (const listing of data.listings) {
+          if (cancelled) break;
+
+          const marker = await createListingMarker(mapElement!, listing, (clicked) => {
+            setSelectedListing(clicked);
+            setListingDetail(null);
+            setIsDetailLoading(true);
+
+            fetch(`/api/listings/${encodeURIComponent(clicked.zpid)}`)
+              .then((r) => (r.ok ? r.json() : null))
+              .then((d: ListingDetailResponse | null) => {
+                if (d?.listing) setListingDetail(d.listing);
+              })
+              .catch((err) => console.error("Detail fetch error:", err))
+              .finally(() => setIsDetailLoading(false));
+          });
+
+          if (cancelled) {
+            marker.remove();
+          } else {
+            listingMarkersRef.current.push(marker);
+          }
+        }
+
+        // Restore selection from URL param after listings are rendered
+        if (!cancelled && selectedZpid && !selectedListing) {
+          const match = data.listings.find((l) => l.zpid === selectedZpid);
+          if (match) {
+            setSelectedListingLocal(match);
+            setIsDetailLoading(true);
+
+            fetch(`/api/listings/${encodeURIComponent(match.zpid)}`)
+              .then((r) => (r.ok ? r.json() : null))
+              .then((d: ListingDetailResponse | null) => {
+                if (d?.listing) setListingDetail(d.listing);
+              })
+              .catch((err) => console.error("Detail fetch error:", err))
+              .finally(() => setIsDetailLoading(false));
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch listings:", err);
+      }
+    }
+
+    fetchAndRenderListings();
+
+    return () => {
+      cancelled = true;
+      removeAllListingMarkers(listingMarkersRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapElement, priceRange, filterNeighborhoods]);
+
+  // ---------------------------------------------------------------------------
+  // Dismiss info card on map tap (not drag)
+  // ---------------------------------------------------------------------------
+
+  /** Stores the pointer-down position so we can distinguish taps from drags. */
+  const dismissPointerRef = useRef<{ x: number; y: number } | null>(null);
+
+  /**
+   * Uses native `pointerdown` / `pointerup` events on the map element to
+   * dismiss the info card instantly on tap. If the pointer moves less than
+   * 5 px between down and up it counts as a tap; otherwise it was a drag
+   * and the card stays open. This avoids the ~300-500 ms latency of the
+   * `gmp-click` gesture event.
+   */
+  useEffect(() => {
+    if (!mapElement || !selectedListing) return;
+
+    const TAP_THRESHOLD = 5;
+
+    function handlePointerDown(e: PointerEvent) {
+      dismissPointerRef.current = { x: e.clientX, y: e.clientY };
+    }
+
+    function handlePointerUp(e: PointerEvent) {
+      const start = dismissPointerRef.current;
+      if (!start) return;
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      if (Math.sqrt(dx * dx + dy * dy) < TAP_THRESHOLD) {
+        setSelectedListing(null);
+        setListingDetail(null);
+      }
+      dismissPointerRef.current = null;
+    }
+
+    mapElement.addEventListener("pointerdown", handlePointerDown);
+    mapElement.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      mapElement.removeEventListener("pointerdown", handlePointerDown);
+      mapElement.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [mapElement, selectedListing]);
 
   // ---------------------------------------------------------------------------
   // Searched-address 3D marker
@@ -785,6 +978,30 @@ export default function Home() {
           >
             📍 {lastSearchedLocation.formattedAddress}
           </button>
+        </div>
+      )}
+
+      {/* Listing Filters - Top Left, below search bar */}
+      {isMapReady && onboardingDone && (
+        <div className="absolute top-20 left-4 z-20">
+          <ListingFilters
+            priceRange={priceRange}
+            onPriceRangeChange={setPriceRange}
+            neighborhoods={activeNeighborhoods}
+            selectedNeighborhoods={filterNeighborhoods}
+            onNeighborhoodChange={setFilterNeighborhoods}
+          />
+        </div>
+      )}
+
+      {/* Listing Info Card - Bottom Center */}
+      {selectedListing && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 pointer-events-auto">
+          <ListingInfoCard
+            listing={selectedListing}
+            detail={listingDetail}
+            isLoading={isDetailLoading}
+          />
         </div>
       )}
 
